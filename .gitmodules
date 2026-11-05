@@ -1,0 +1,3 @@
+[submodule "vendor/linked-archi-apm"]
+	path = vendor/linked-archi-apm
+	url = https://github.com/linked-archi/linked-archi-apm.git

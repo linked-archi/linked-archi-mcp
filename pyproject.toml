@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "linked-archi-mcp"
+version = "0.1.0"
+description = "MCP server exposing the linked-archi-apm architecture knowledge-graph skills as read-only tools and resources."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+authors = [{ name = "Kalin Maldzhanski" }]
+keywords = ["mcp", "model-context-protocol", "enterprise-architecture", "knowledge-graph", "sparql", "rdf", "linked-archi"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Operating System :: OS Independent",
+]
+# The skills run as subprocesses of *this* interpreter, so their dependencies live here
+# too: PyYAML always, pyoxigraph for local RDF files, pyshacl for SHACL validation.
+dependencies = [
+  "mcp>=2.3,<3",
+  "anyio>=4.5",
+  "PyYAML>=6",
+  "uvicorn>=0.30",
+]
+
+[project.optional-dependencies]
+rdf = ["pyoxigraph>=0.4"]
+shacl = ["pyshacl>=0.26"]
+all = ["pyoxigraph>=0.4", "pyshacl>=0.26"]
+test = ["pytest>=8", "pyoxigraph>=0.4", "pyshacl>=0.26"]
+
+[project.scripts]
+linked-archi-mcp = "linked_archi_mcp.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/linked-archi/linked-archi-mcp"
+Skills = "https://github.com/linked-archi/linked-archi-apm"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/linked_archi_mcp"]
+
+[tool.hatch.build.targets.sdist]
+exclude = ["vendor/"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
