@@ -15,6 +15,7 @@ error
 
 from __future__ import annotations
 
+import atexit
 import importlib.util
 import json
 import re
@@ -25,10 +26,11 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.mcpserver.resources import FileResource
 from mcp_types import ToolAnnotations
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from . import __version__
 from .config import Config, ConfigError
+from .evidence import EvidenceError, EvidenceStore
 from .runner import Completed, Runner, RunTimeout
 from .skills import Skills
 
@@ -39,6 +41,48 @@ READ_ONLY_OPEN = ToolAnnotations(read_only_hint=True, destructive_hint=False,
                                  idempotent_hint=True, open_world_hint=True)
 
 DEFAULT_PROFILE = "linked-archi-default"
+
+Scalar = str | int | float | bool
+
+
+class Claim(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    claim: str
+    steps: list[int] = Field(default_factory=list, description="Step numbers the claim rests on.")
+
+
+class Findings(BaseModel):
+    """The evidence model's claim classes. An empty class is a statement; a missing one
+    is an omission, so all five are required."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    answer: str = ""
+    graph_facts: list[Claim] = Field(description="Explicit triples or result bindings.")
+    derived_facts: list[Claim] = Field(description="Produced by traversal or aggregation.")
+    document_statements: list[Claim] = Field(description="Claims in a retrieved source.")
+    inferences: list[Claim] = Field(description="Your conclusions from the above.")
+    unknowns: list[Claim] = Field(description="Absent or ambiguous evidence; may cite no step.")
+
+
+class BatchQuery(BaseModel):
+    """One batch entry: exactly one of ``template`` or ``sparql``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str | None = Field(None, description="Label echoed back on the result, e.g. step-01.")
+    template: str | None = Field(None, description="Template name.")
+    parameters: dict[str, Scalar] | None = Field(None, description="Template parameters (a plan manifest's `set`).")
+    sparql: str | None = Field(None, description="Read-only SPARQL instead of a template.")
+
+    @model_validator(mode="after")
+    def _one_source(self) -> "BatchQuery":
+        if bool(self.template) == bool(self.sparql):
+            raise ValueError("give exactly one of template or sparql")
+        if self.sparql and self.parameters:
+            raise ValueError("parameters apply to templates only")
+        return self
 
 Stage = Literal["orientation", "resolution", "discovery", "analysis", "enrichment",
                 "quality", "views"]
@@ -53,7 +97,11 @@ Workflow:
 2. catalog_list (with the profile) to see which tested templates this dataset supports.
 3. query_run a template; query_literal only when no template fits.
 4. For a multi-step question, analyse_plan returns ordered steps. Run each step's
-   `template` with its `parameters` through query_run.
+   `template` with its `parameters` through query_run. Run a plan batch whose status is
+   "ready" through query_batch instead (its manifest's `set` is `parameters`): the
+   dataset loads once rather than once per query.
+5. Every answered query carries an evidence_id. analyse_bundle assembles the ones an
+   answer rests on, with findings split by claim class, into a reproducible bundle.
 
 Rules:
 - status "refused" is an answer, not an error: read `message` and use the named
@@ -65,8 +113,12 @@ The skills' own documentation is available as resources under linked-archi://ski
 """
 
 
-def build_server(config: Config, skills: Skills, *, name: str = "linked-archi") -> MCPServer:
+def build_server(config: Config, skills: Skills, *, name: str = "linked-archi",
+                 evidence: EvidenceStore | None = None) -> MCPServer:
     runner = Runner(skills, timeout_s=config.run_timeout_s)
+    if evidence is None:
+        evidence = EvidenceStore()
+        atexit.register(evidence.close)
     mcp = MCPServer(name=name, title="Linked.Archi knowledge graph",
                     version=__version__, instructions=INSTRUCTIONS)
 
@@ -155,9 +207,7 @@ def build_server(config: Config, skills: Skills, *, name: str = "linked-archi") 
     def set_args(parameters: dict[str, str | int | float | bool] | None) -> list[str]:
         out: list[str] = []
         for key, value in (parameters or {}).items():
-            if isinstance(value, bool):
-                value = "true" if value else "false"
-            out += ["--set", f"{key}={value}"]
+            out += ["--set", f"{key}={_scalar(value)}"]
         return out
 
     @mcp.tool(annotations=READ_ONLY)
@@ -192,7 +242,7 @@ def build_server(config: Config, skills: Skills, *, name: str = "linked-archi") 
         done = await run("query", ["query", "run", template, "--json",
                                    *profile_args(profile), *config.query_args(),
                                    *config.connect_args(target), *set_args(parameters)])
-        return _envelope(done, max_rows or config.max_rows, include_query)
+        return _envelope(done, evidence, template, max_rows or config.max_rows, include_query)
 
     @mcp.tool(annotations=READ_ONLY_OPEN)
     async def query_literal(
@@ -208,7 +258,60 @@ def build_server(config: Config, skills: Skills, *, name: str = "linked-archi") 
         target = target_for(data, endpoint)
         done = await run("query", ["query", "literal", "--json", "--query", sparql,
                                    *profile_args(profile), *config.connect_args(target)])
-        return _envelope(done, max_rows or config.max_rows, include_query=False)
+        return _envelope(done, evidence, "literal", max_rows or config.max_rows,
+                         include_query=False)
+
+    @mcp.tool(annotations=READ_ONLY_OPEN)
+    async def query_batch(
+        queries: Annotated[list[BatchQuery], Field(min_length=1, max_length=50, description="Independent queries, each a template (with parameters) or read-only sparql.")],
+        profile: Annotated[str | None, Field(description="Profile for every entry. Omit for the server default.")] = None,
+        data: Annotated[list[str] | None, Field(description="Local RDF files instead of the server's dataset.")] = None,
+        endpoint: Annotated[str | None, Field(description="HTTPS SPARQL endpoint instead of the server's dataset.")] = None,
+        max_rows: Annotated[int | None, Field(ge=1, description="Rows to return per result.")] = None,
+    ) -> dict[str, Any]:
+        """Run several independent queries in one invocation, loading the dataset once.
+
+        Use it for queries whose parameters are already known - an analyse_plan batch
+        whose status is "ready", or several lookups - not for steps that need an earlier
+        result. Every entry is rendered and checked read-only before any runs, so one
+        refused entry refuses the whole batch: drop or replace it and resend."""
+        target = target_for(data, endpoint)
+        cap = max_rows or config.max_rows
+        with evidence.scratch() as scratch:
+            entries, reserved = [], []
+            for index, query in enumerate(queries, start=1):
+                label = query.id or query.template or f"query-{index}"
+                evidence_id, out = evidence.new_path(label)
+                reserved.append((label, query, evidence_id, out))
+                entry: dict[str, Any] = {"id": label, "out": str(out)}
+                if query.template:
+                    entry["template"] = query.template
+                    if query.parameters:
+                        entry["set"] = {k: _scalar(v) for k, v in query.parameters.items()}
+                else:
+                    entry["query"] = query.sparql
+                entries.append(entry)
+            manifest = scratch / "batch.json"
+            manifest.write_text(json.dumps({"schema_version": 1, "queries": entries}),
+                                encoding="utf-8")
+            done = await run("query", ["query", "batch", str(manifest),
+                                       *profile_args(profile), *config.query_args(),
+                                       *config.connect_args(target),
+                                       "-o", str(scratch / "summary.txt")])
+        if done.returncode != 0:
+            for _, _, _, out in reserved:
+                out.unlink(missing_ok=True)
+            return _refusal_or_error(done)
+        results = []
+        for label, query, evidence_id, out in reserved:
+            try:
+                envelope = json.loads(out.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ToolError(f"Batch entry {label!r} wrote no readable envelope: {exc}") from exc
+            evidence.commit(evidence_id, out)
+            results.append({"id": label,
+                            **_shape(envelope, evidence_id, cap, include_query=False)})
+        return {"status": "answered", "count": len(results), "results": results}
 
     @mcp.tool(annotations=READ_ONLY)
     async def query_lint(
@@ -326,7 +429,9 @@ def build_server(config: Config, skills: Skills, *, name: str = "linked-archi") 
     ) -> dict[str, Any]:
         """Route a question to an analysis pattern and return ordered steps. Executes
         nothing: run each step's `template` with its `parameters` via query_run, honour
-        each step's `stop_when`, and resolve placeholders from earlier results."""
+        each step's `stop_when`, and resolve placeholders from earlier results. A batch
+        with status "ready" can go through query_batch in one call; one "awaiting-evidence"
+        waits until the steps it depends on have been reviewed."""
         if not question and not concerns:
             raise ToolError("Give a question, or concerns to plan for.")
         request: dict[str, Any] = {"schema_version": 1, "budget": budget,
@@ -337,15 +442,51 @@ def build_server(config: Config, skills: Skills, *, name: str = "linked-archi") 
             request["concerns"] = concerns
         if mode:
             request["mode"] = mode
-        resolved = profile_for(profile)
-        if resolved:
-            request["profile"] = resolved
+        # Always name one: without it every step's availability is "unknown", and the
+        # planner then batches nothing and cannot flag a step this dataset will refuse.
+        request["profile"] = profile_for(profile) or DEFAULT_PROFILE
         if not config.target.empty:
             request.update(config.target.describe())
         done = await run("analyse", ["_machine", "plan"], stdin=json.dumps(request))
         if done.returncode == 1:
             return _refusal(done)
         return _json_or_error(done)
+
+    @mcp.tool(annotations=READ_ONLY)
+    async def analyse_bundle(
+        evidence_ids: Annotated[list[str], Field(min_length=1, description="evidence_id of each query result, in step order. Step N in findings is the Nth id here.")],
+        question: Annotated[str, Field(description="The question the investigation answers.")],
+        findings: Annotated[Findings | None, Field(description="The interpretation, split by claim class. Every class must be present, even empty; every claim except an unknown cites step numbers.")] = None,
+        dataset_revision: Annotated[str | None, Field(description="Dataset revision (e.g. a git commit) to record. Recorded as caller-supplied.")] = None,
+    ) -> dict[str, Any]:
+        """Assemble query results into one reviewable, reproducible investigation bundle,
+        and render it as Markdown.
+
+        Refused (status "refused") when results span two datasets or two profiles, when a
+        claim class is missing, or when a claim cites no step or a step not in the bundle."""
+        try:
+            steps = [str(evidence.path(e)) for e in evidence_ids]
+        except EvidenceError as exc:
+            raise ToolError(str(exc.args[0])) from exc
+        with evidence.scratch() as scratch:
+            request: dict[str, Any] = {"schema_version": 1, "steps": steps,
+                                       "question": question}
+            if findings is not None:
+                findings_file = scratch / "findings.json"
+                findings_file.write_text(findings.model_dump_json(), encoding="utf-8")
+                request["findings"] = str(findings_file)
+            if dataset_revision:
+                request["dataset_revision"] = dataset_revision
+            done = await run("analyse", ["_machine", "bundle"], stdin=json.dumps(request))
+            if done.returncode == 1:
+                return _refusal(done)
+            bundle = _json_or_error(done)
+            bundle_file = scratch / "bundle.json"
+            bundle_file.write_text(done.stdout, encoding="utf-8")
+            rendered = await run("analyse", ["render", "--bundle", str(bundle_file)])
+        if rendered.returncode != 0:
+            raise ToolError(_message(rendered))
+        return {"status": "bundled", "bundle": bundle, "markdown": rendered.stdout}
 
     # -- validation -------------------------------------------------------------------
 
@@ -421,12 +562,14 @@ def build_server(config: Config, skills: Skills, *, name: str = "linked-archi") 
             f"Investigate this architecture question against the connected graph:\n\n"
             f"{question}\n\n"
             "1. If not done this session: dataset_connect, profile_recommend, profile_verify.\n"
-            "2. analyse_plan with the question. Run each step's template through query_run\n"
-            "   in order, binding placeholders from earlier results; stop where a step's\n"
-            "   stop_when holds.\n"
+            "2. analyse_plan with the question. Run ready batches through query_batch and the\n"
+            "   remaining steps through query_run in order, binding placeholders from earlier\n"
+            "   results; stop where a step's stop_when holds.\n"
             "3. A refused step is a routing answer: take the named alternative.\n"
             "4. Answer in three parts - graph facts (cite template and query_id), inference,\n"
-            "   and unknowns - and say what the evidence cannot establish."
+            "   and unknowns - and say what the evidence cannot establish.\n"
+            "5. analyse_bundle the evidence_ids your answer rests on, with those findings, so\n"
+            "   the answer can be reviewed and reproduced."
         )
 
     return mcp
@@ -477,17 +620,32 @@ def _refusal_or_error(done: Completed) -> dict[str, Any]:
     raise ToolError(_message(done))
 
 
-def _envelope(done: Completed, max_rows: int, include_query: bool) -> dict[str, Any]:
+def _scalar(value: str | int | float | bool) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _envelope(done: Completed, evidence: EvidenceStore, label: str, max_rows: int,
+              include_query: bool) -> dict[str, Any]:
     if done.returncode != 0:
         return _refusal_or_error(done)
     envelope = _json_or_error(done)
+    # Saved byte for byte as the query owner printed it: that is the bundle's input.
+    evidence_id = evidence.save(label, done.stdout)
+    return _shape(envelope, evidence_id, max_rows, include_query)
+
+
+def _shape(envelope: dict[str, Any], evidence_id: str, max_rows: int,
+           include_query: bool) -> dict[str, Any]:
+    envelope = dict(envelope)
     rows = envelope.get("rows")
     if isinstance(rows, list) and len(rows) > max_rows:
         envelope["rows"] = rows[:max_rows]
         envelope["rows_omitted"] = len(rows) - max_rows
     if not include_query:
         envelope.pop("query", None)
-    return {"status": "answered", **envelope}
+    return {"status": "answered", "evidence_id": evidence_id, **envelope}
 
 
 def _doc_description(relpath: str, skill: str) -> str:

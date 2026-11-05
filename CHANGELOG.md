@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- `query_batch`: several independent queries in one skill invocation, parsing the dataset
+  once. Takes `analyse_plan` batches with status `ready` directly.
+- Answered queries return an `evidence_id`; the envelope is kept unchanged in a bounded,
+  process-local store.
+- `analyse_bundle`: assemble cited results and findings, split by claim class, into a
+  reproducible bundle with a Markdown rendering.
+- `analyse_plan` always names a profile (the server default when none is given). Without
+  one, step availability was unknown and the planner offered no batches.
+
 ## 0.1.0 - unreleased
 
 First version.
