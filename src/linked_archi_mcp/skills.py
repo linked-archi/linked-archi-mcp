@@ -9,7 +9,11 @@ Resolution order, first match wins and never falls back:
 
 1. an explicit ``--skills-dir``;
 2. ``$LINKED_ARCHI_SKILLS_DIR``, the same variable the skills use to find each other;
-3. the ``vendor/linked-archi-apm`` git submodule of a source checkout.
+3. the copy bundled into the wheel at build time, unmodified, from the submodule pin;
+4. the ``vendor/linked-archi-apm`` git submodule of a source checkout.
+
+3 and 4 are the same released tree reached two ways: an installed wheel has no
+submodule, and a source checkout has no bundle.
 """
 
 from __future__ import annotations
@@ -36,6 +40,8 @@ OWNERS: dict[str, tuple[str, str]] = {
 #: Owners every tool path needs. Source and validate are optional companions.
 REQUIRED = ("profile", "connect", "query", "analyse")
 
+#: Where the wheel carries the skills (see ``force-include`` in pyproject.toml).
+BUNDLED = Path(__file__).resolve().parent / "_skills"
 VENDORED = Path(__file__).resolve().parents[2] / "vendor" / "linked-archi-apm" / "skills"
 
 
@@ -122,13 +128,16 @@ def locate(explicit: str | os.PathLike[str] | None = None,
         skills = Skills(Path(explicit).expanduser().resolve(), "--skills-dir")
     elif env.get(ENV_SKILLS_DIR):
         skills = Skills(Path(env[ENV_SKILLS_DIR]).expanduser().resolve(), f"${ENV_SKILLS_DIR}")
+    elif BUNDLED.is_dir():
+        skills = Skills(BUNDLED, "bundled")
     elif VENDORED.is_dir():
         skills = Skills(VENDORED, "vendored submodule")
     else:
         raise SkillsNotFound(
             "No linked-archi-apm skills found. Pass --skills-dir, set "
-            f"${ENV_SKILLS_DIR} to the directory holding the linked-archi-* skills, or "
-            "run from a checkout with `git submodule update --init`."
+            f"${ENV_SKILLS_DIR} to the directory holding the linked-archi-* skills, "
+            "install a released wheel (which bundles them), or run from a checkout with "
+            "`git submodule update --init`."
         )
     missing = [OWNERS[o][0] for o in REQUIRED if not skills.has(o)]
     if missing:

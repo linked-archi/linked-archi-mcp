@@ -110,8 +110,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         server.run("stdio")
         return 0
 
-    from .http import ENV_TOKEN, is_loopback, serve
+    from .http import ENV_TOKEN, HEALTH_PATH, is_loopback, serve
 
+    if args.path == HEALTH_PATH:
+        print(f"linked-archi-mcp: --path {HEALTH_PATH} is reserved for the health check.",
+              file=sys.stderr)
+        return 2
     token = os.environ.get(ENV_TOKEN) or None
     if not token and not is_loopback(args.host) and not args.insecure_no_auth:
         print(f"linked-archi-mcp: refusing to bind {args.host} without ${ENV_TOKEN}. "
