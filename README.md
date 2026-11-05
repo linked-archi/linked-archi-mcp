@@ -1,5 +1,7 @@
 # linked-archi-mcp
 
+<!-- mcp-name: io.github.linked-archi/linked-archi-mcp -->
+
 An [MCP](https://modelcontextprotocol.io) server for read-only analysis of architecture
 knowledge graphs: ArchiMate, BPMN, C4/Structurizr, Backstage and LeanIX models converted to RDF
 by the [Linked.Archi converters](https://gitlab.com/linked-archi/linked-archi-tools/converters/converters).
@@ -89,13 +91,25 @@ writes a cache, which needs its own design for a server that can run over HTTP.
 
 ## Install
 
-Python 3.11+. The skills run as subprocesses of the server's own interpreter, so their
-dependencies are installed alongside it:
+Python 3.11+. Nothing else is needed: the wheel bundles the skills, and the skills run as
+subprocesses of the server's own interpreter, so their dependencies install with it.
 
 ```bash
-git clone --recurse-submodules https://github.com/linked-archi/linked-archi-mcp
-cd linked-archi-mcp
-pip install -e '.[all]'      # pyoxigraph for local RDF, pyshacl for validation
+uvx linked-archi-mcp --data /abs/path/merged.trig           # run without installing
+pip install linked-archi-mcp                                # or install it
+```
+
+SHACL validation (`validate_run`) needs the `shacl` extra, which pulls in rdflib:
+
+```bash
+uvx --from 'linked-archi-mcp[shacl]' linked-archi-mcp --data /abs/path/merged.trig
+pip install 'linked-archi-mcp[shacl]'
+```
+
+A container image with the extra is published for each release:
+
+```bash
+docker pull ghcr.io/linked-archi/linked-archi-mcp
 ```
 
 ### Where the skills come from
@@ -104,20 +118,19 @@ Resolution stops at the first match and never falls back:
 
 1. `--skills-dir DIR`
 2. `$LINKED_ARCHI_SKILLS_DIR`, the same variable the skills use to find each other
-3. the `vendor/linked-archi-apm` submodule, pinned to a released tag (currently `v0.10.0`)
+3. the copy bundled in the installed package
+4. the `vendor/linked-archi-apm` submodule of a source checkout
 
-The submodule gives development and CI a reproducible pin. To serve the skills you
-installed with APM instead, point the server at them:
+3 and 4 are the same tree: the
+[linked-archi-apm](https://github.com/linked-archi/linked-archi-apm) skills at the
+submodule's released tag (currently `v0.10.0`), copied into the wheel unmodified at build
+time. To serve the skills you installed with APM instead, point the server at them:
 
 ```bash
 LINKED_ARCHI_SKILLS_DIR=~/.claude/skills linked-archi-mcp --data graph.trig
 ```
 
-`doctor` reports which tree was used and each skill's version. To move the pin:
-
-```bash
-git -C vendor/linked-archi-apm fetch --tags && git -C vendor/linked-archi-apm checkout vX.Y.Z
-```
+`doctor` reports which tree was used and each skill's version.
 
 ## Run
 
@@ -130,7 +143,7 @@ linked-archi-mcp --data dist/merged.trig --profile linked-archi-default
 Claude Code:
 
 ```bash
-claude mcp add linked-archi -- linked-archi-mcp --data /abs/path/merged.trig
+claude mcp add linked-archi -- uvx linked-archi-mcp --data /abs/path/merged.trig
 ```
 
 Or in any client's JSON config:
@@ -139,11 +152,17 @@ Or in any client's JSON config:
 {
   "mcpServers": {
     "linked-archi": {
-      "command": "linked-archi-mcp",
-      "args": ["--data", "/abs/path/merged.trig"]
+      "command": "uvx",
+      "args": ["linked-archi-mcp", "--data", "/abs/path/merged.trig"]
     }
   }
 }
+```
+
+The container works over stdio too: give it arguments and mount the data read-only.
+
+```bash
+docker run -i --rm -v /abs/path:/data:ro ghcr.io/linked-archi/linked-archi-mcp --data /data/merged.trig
 ```
 
 Over stdio, tool calls may name other files or endpoints with `data` / `endpoint`, since
@@ -173,6 +192,24 @@ LINKED_ARCHI_MCP_TOKEN=$(openssl rand -hex 32) \
   --endpoint https://graph.example.org/sparql --profile linked-archi-merged
 ```
 
+`GET /healthz` answers `ok` without the token, for load balancers and orchestrators. It
+reveals nothing else.
+
+#### Container
+
+Without arguments the image serves streamable HTTP on port 8000, bound to `0.0.0.0`, so it
+starts only with a token. It runs as an unprivileged user.
+
+```bash
+docker run --rm -p 8000:8000 \
+  -e LINKED_ARCHI_MCP_TOKEN=$(openssl rand -hex 32) \
+  -e LINKED_ARCHI_DATA=/data/merged.trig -v /abs/path:/data:ro \
+  ghcr.io/linked-archi/linked-archi-mcp
+```
+
+Arguments replace the default `http --host 0.0.0.0`, so repeat them when adding flags:
+`... ghcr.io/linked-archi/linked-archi-mcp http --host 0.0.0.0 --profile linked-archi-merged`.
+
 ### Options
 
 | Flag | Meaning |
@@ -190,14 +227,26 @@ LINKED_ARCHI_MCP_TOKEN=$(openssl rand -hex 32) \
 ## Develop
 
 ```bash
-git submodule update --init
+git clone --recurse-submodules https://github.com/linked-archi/linked-archi-mcp
+cd linked-archi-mcp
 pip install -e '.[test]'
 pytest
 ```
 
 The tests drive the server in-process with the MCP client against the committed fixtures
-of the pinned skills.
+of the pinned skills. CI also builds the sdist and wheel, installs the wheel into a clean
+environment, and runs `scripts/smoke.py` against it from outside the checkout. It does the
+same with the container image, over HTTP. Releases are described in
+[RELEASING.md](https://github.com/linked-archi/linked-archi-mcp/blob/main/RELEASING.md).
+
+To move the skills pin:
+
+```bash
+git -C vendor/linked-archi-apm fetch --tags && git -C vendor/linked-archi-apm checkout vX.Y.Z
+```
 
 ## License
 
-Apache-2.0
+Apache-2.0. The wheel and the image include an unmodified copy of the
+[linked-archi-apm](https://github.com/linked-archi/linked-archi-apm) skills, also
+Apache-2.0; their LICENSE and NOTICE are shipped with them.

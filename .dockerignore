@@ -1,0 +1,19 @@
+# Only what the wheel is built from: pyproject.toml, README.md, LICENSE, src/ and the
+# submodule's skills, LICENSE and NOTICE. Later rules win, so bytecode is dropped last.
+.git
+**/.git
+.github
+.venv
+venv
+build
+dist
+*.egg-info
+.pytest_cache
+tests
+scripts
+vendor/linked-archi-apm/*
+!vendor/linked-archi-apm/skills
+!vendor/linked-archi-apm/LICENSE
+!vendor/linked-archi-apm/NOTICE
+**/__pycache__
+**/*.pyc

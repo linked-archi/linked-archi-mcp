@@ -1,51 +1,76 @@
 [build-system]
-requires = ["hatchling>=1.24"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
 name = "linked-archi-mcp"
-version = "0.1.0"
+dynamic = ["version"]
 description = "MCP server exposing the linked-archi-apm architecture knowledge-graph skills as read-only tools and resources."
 readme = "README.md"
 license = "Apache-2.0"
-license-files = ["LICENSE"]
+# The wheel redistributes the linked-archi-apm skills unmodified, so their licence and
+# NOTICE travel with it (Apache-2.0 section 4).
+license-files = ["LICENSE", "vendor/linked-archi-apm/LICENSE", "vendor/linked-archi-apm/NOTICE"]
 requires-python = ">=3.11"
 authors = [{ name = "Kalin Maldzhanski" }]
-keywords = ["mcp", "model-context-protocol", "enterprise-architecture", "knowledge-graph", "sparql", "rdf", "linked-archi"]
+keywords = ["mcp", "model-context-protocol", "enterprise-architecture", "knowledge-graph", "sparql", "rdf", "archimate", "linked-archi"]
 classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
   "Operating System :: OS Independent",
+  "Topic :: Scientific/Engineering :: Information Analysis",
 ]
 # The skills run as subprocesses of *this* interpreter, so their dependencies live here
-# too: PyYAML always, pyoxigraph for local RDF files, pyshacl for SHACL validation.
+# too. pyoxigraph is not optional for a server: without it no local RDF file loads, and
+# `uvx linked-archi-mcp --data graph.trig` has to work as typed. 0.5.9 is the first
+# release with the RDF 1.2 triple terms converter output carries.
 dependencies = [
   "mcp>=2.3,<3",
   "anyio>=4.5",
   "PyYAML>=6",
   "uvicorn>=0.30",
+  "pyoxigraph>=0.5.9",
 ]
 
 [project.optional-dependencies]
-rdf = ["pyoxigraph>=0.4"]
+# SHACL validation (validate_run): pulls in rdflib, so it stays opt-in.
 shacl = ["pyshacl>=0.26"]
-all = ["pyoxigraph>=0.4", "pyshacl>=0.26"]
-test = ["pytest>=8", "pyoxigraph>=0.4", "pyshacl>=0.26"]
+test = ["pytest>=8", "pyshacl>=0.26"]
 
 [project.scripts]
 linked-archi-mcp = "linked_archi_mcp.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/linked-archi/linked-archi-mcp"
+Changelog = "https://github.com/linked-archi/linked-archi-mcp/blob/main/CHANGELOG.md"
 Skills = "https://github.com/linked-archi/linked-archi-apm"
+
+[tool.hatch.version]
+path = "src/linked_archi_mcp/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/linked_archi_mcp"]
 
+# The released skills ride inside the package, copied whole and unmodified from the
+# submodule pin, so an installed wheel needs no checkout. __pycache__ is never copied.
+[tool.hatch.build.targets.wheel.force-include]
+"vendor/linked-archi-apm/skills" = "linked_archi_mcp/_skills"
+
+# Only what a wheel is built from: the package, the bundled skills and their licence.
+# The submodule's fixtures, tests and docs stay out.
 [tool.hatch.build.targets.sdist]
-exclude = ["vendor/"]
+only-include = [
+  "src",
+  "vendor/linked-archi-apm/skills",
+  "vendor/linked-archi-apm/LICENSE",
+  "vendor/linked-archi-apm/NOTICE",
+  "CHANGELOG.md",
+  "server.json",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

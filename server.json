@@ -1,0 +1,42 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.linked-archi/linked-archi-mcp",
+  "title": "Linked.Archi knowledge graph",
+  "description": "Read-only analysis of ArchiMate, BPMN, C4, Backstage and LeanIX models converted to RDF graphs",
+  "repository": {
+    "url": "https://github.com/linked-archi/linked-archi-mcp",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "linked-archi-mcp",
+      "version": "0.1.0",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "named",
+          "name": "--data",
+          "description": "RDF file to query; .trig and .nq keep named graphs. Repeat to merge several files.",
+          "format": "filepath",
+          "isRepeated": true
+        },
+        {
+          "type": "named",
+          "name": "--endpoint",
+          "description": "HTTPS SPARQL endpoint to query instead of local files."
+        },
+        {
+          "type": "named",
+          "name": "--profile",
+          "description": "Graph profile describing the dataset's vocabulary (default: linked-archi-default)."
+        }
+      ]
+    }
+  ]
+}
