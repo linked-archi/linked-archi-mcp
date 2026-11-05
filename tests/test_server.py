@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
 from mcp import Client
 
 from linked_archi_mcp.config import Config, Target
+from linked_archi_mcp.evidence import EvidenceStore
 from linked_archi_mcp.server import build_server
 
 from .conftest import BASE
@@ -37,8 +39,13 @@ async def call(server, name: str, args: dict[str, Any] | None = None):
 
 
 @pytest.fixture
-def server(config, skills):
-    return build_server(config, skills)
+def evidence(tmp_path):
+    return EvidenceStore(tmp_path / "evidence")
+
+
+@pytest.fixture
+def server(config, skills, evidence):
+    return build_server(config, skills, evidence=evidence)
 
 
 async def test_surface(server):
@@ -217,3 +224,107 @@ async def test_stdio_transport():
     async with Client(params) as client:
         result = await client.call_tool("query_run", {"template": "core/models"})
         assert result.structured_content["status"] == "answered"
+
+
+# -- batching and evidence ----------------------------------------------------------------
+
+
+async def test_answers_carry_saved_evidence(server, evidence):
+    out = (await call(server, "query_run", {"template": "core/models", "max_rows": 1})).structured_content
+    saved = json.loads(evidence.path(out["evidence_id"]).read_text())
+    # The saved envelope is the owner's, untouched by the response shaping.
+    assert len(saved["rows"]) == 5 and "query" in saved
+    assert saved["query_id"] == out["query_id"]
+
+
+async def test_batch_loads_once(server, evidence):
+    result = await call(server, "query_batch", {"queries": [
+        {"id": "inventory", "template": "core/inventory-summary"},
+        {"template": "core/resolve-element", "parameters": {"TERM": "order"}},
+        {"sparql": "SELECT (COUNT(*) AS ?n) WHERE { GRAPH ?g { ?s ?p ?o } }"},
+    ]})
+    assert not result.is_error, result.content
+    out = result.structured_content
+    assert out["status"] == "answered" and out["count"] == 3
+    ids = [r["id"] for r in out["results"]]
+    assert ids == ["inventory", "core/resolve-element", "query-3"]
+    assert out["results"][0]["load_ms"] >= 0
+    assert all(r["load_ms"] == 0 for r in out["results"][1:])
+    for r in out["results"]:
+        assert r["status"] == "answered" and evidence.path(r["evidence_id"]).is_file()
+
+
+async def test_batch_with_one_refused_entry_refuses_and_leaves_nothing(server, evidence):
+    result = await call(server, "query_batch", {"profile": "linked-archi-qualified", "queries": [
+        {"template": "core/models"}, {"template": "core/dependents-direct"}]})
+    out = result.structured_content
+    assert out["status"] == "refused"
+    assert "core/dependents-qualified" in out["alternatives"]
+    assert not list(evidence.root.glob("e-*.json"))
+
+
+async def test_batch_entry_needs_exactly_one_source(server):
+    both = await call(server, "query_batch", {"queries": [
+        {"template": "core/models", "sparql": "SELECT * WHERE { ?s ?p ?o }"}]})
+    assert both.is_error
+    neither = await call(server, "query_batch", {"queries": [{"id": "x"}]})
+    assert neither.is_error
+
+
+async def test_plan_ready_batch_runs_through_query_batch(server):
+    plan = (await call(server, "analyse_plan", {
+        "question": 'what depends on "Order Service"?'})).structured_content
+    ready = [b for b in plan["batches"] if b["status"] == "ready"]
+    assert ready, plan["batches"]
+    queries = [{"id": q["id"], "template": q["template"], "parameters": q.get("set") or None}
+               for q in ready[0]["manifest"]["queries"]]
+    out = (await call(server, "query_batch", {"queries": queries})).structured_content
+    assert out["status"] == "answered" and out["count"] == len(queries)
+
+
+FINDINGS = {
+    "answer": "Five models are loaded.",
+    "graph_facts": [{"claim": "Five models are present.", "steps": [2]}],
+    "derived_facts": [],
+    "document_statements": [],
+    "inferences": [],
+    "unknowns": [{"claim": "Whether the models are current."}],
+}
+
+
+async def test_bundle_round_trip(server):
+    batch = (await call(server, "query_batch", {"queries": [
+        {"template": "core/inventory-summary"}, {"template": "core/models"}]})).structured_content
+    ids = [r["evidence_id"] for r in batch["results"]]
+    result = await call(server, "analyse_bundle", {
+        "evidence_ids": ids, "question": "What is loaded?", "findings": FINDINGS})
+    assert not result.is_error, result.content
+    out = result.structured_content
+    assert out["status"] == "bundled"
+    assert [s["number"] for s in out["bundle"]["steps"]] == [1, 2]
+    assert "What is loaded?" in out["markdown"] and "Five models are present." in out["markdown"]
+
+
+async def test_bundle_refuses_an_uncited_claim(server):
+    run = (await call(server, "query_run", {"template": "core/models"})).structured_content
+    findings = dict(FINDINGS, graph_facts=[{"claim": "Five models.", "steps": []}])
+    out = (await call(server, "analyse_bundle", {
+        "evidence_ids": [run["evidence_id"]], "question": "q", "findings": findings})).structured_content
+    assert out["status"] == "refused" and "cites no step" in out["message"]
+
+
+async def test_bundle_requires_every_claim_class(server):
+    run = (await call(server, "query_run", {"template": "core/models"})).structured_content
+    findings = {k: v for k, v in FINDINGS.items() if k != "unknowns"}
+    result = await call(server, "analyse_bundle", {
+        "evidence_ids": [run["evidence_id"]], "question": "q", "findings": findings})
+    assert result.is_error and "unknowns" in result.content[0].text
+
+
+async def test_bundle_rejects_unknown_evidence(server):
+    result = await call(server, "analyse_bundle", {"evidence_ids": ["e-000000000000"],
+                                                   "question": "q"})
+    assert result.is_error and "Unknown evidence_id" in result.content[0].text
+    traversal = await call(server, "analyse_bundle", {"evidence_ids": ["../../etc/passwd"],
+                                                      "question": "q"})
+    assert traversal.is_error

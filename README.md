@@ -36,10 +36,12 @@ never returns an empty result, which would read as "nothing exists".
 | `profile_verify` | profile | Check a profile's claims against the dataset (`verified` or `drift`) |
 | `catalog_list` / `catalog_show` | query | Templates gated by the profile; one template's parameters and `does_not_prove` |
 | `query_render` | query | Template → SPARQL, without executing |
-| `query_run` | query | Execute a template; result envelope with provenance |
+| `query_run` | query | Execute a template; result envelope with provenance and an `evidence_id` |
+| `query_batch` | query | Several independent queries in one invocation: the dataset loads once |
 | `query_literal` | query | Execute hand-written read-only SPARQL (updates, `LOAD` and `SERVICE` refused) |
 | `query_lint` | query | Is this SPARQL read-only? |
 | `analyse_patterns` / `analyse_plan` | analyse | Route a question to a pattern and get ordered steps (executes nothing) |
+| `analyse_bundle` | analyse | Assemble cited results and findings into a reproducible bundle, rendered as Markdown |
 | `validate_run` | validate | SHACL in-process, with target-class coverage |
 | `doctor` | — | Skill locations and versions, dependencies, configured target |
 
@@ -55,9 +57,35 @@ analyst.
 **Prompt:** `investigate(question)`. It connects and verifies, plans, runs each step, and
 answers in three parts: facts, inference and unknowns.
 
-Source acquisition (`la-source`) and evidence bundling (`la-analyse bundle`) are not
-exposed yet. They fetch over the network and write files, which needs its own design for
-a server that can run over HTTP.
+### Batching
+
+Each tool call starts a skill process, and a local dataset is parsed once per process.
+`query_batch` runs many queries in one process, so the dataset is parsed once. On the
+committed sample dataset, five templates took 2.3 s as separate `query_run` calls and
+0.5 s as one batch. On a large graph the gap widens, because the parse dominates.
+`analyse_plan` marks groups of steps that can run together as `batches` with status
+`ready`. Pass a manifest's `queries` to `query_batch`, giving each entry's `set` as
+`parameters`.
+
+A batch is checked before any of it runs, so one refused entry refuses the whole batch.
+Steps that depend on an earlier result still go one at a time through `query_run`.
+
+The skills' `--store cached` mode is also available (server flag `--store`), but it is
+not a free speed-up. It loads about 100× faster and queries about 3× slower, which helps
+many cheap lookups against a large unchanging graph and hurts aggregations. See the
+connect skill's `references/store-modes.md`.
+
+### Evidence and bundles
+
+Every answered query carries an `evidence_id`. The server saves the query owner's
+envelope unchanged in a bounded, process-local store (the last 500, removed on exit).
+`analyse_bundle` takes the ids an answer rests on, in step order, plus `findings` split
+into the evidence model's five claim classes. It returns the bundle document and its
+Markdown rendering. The analyse skill refuses a bundle that mixes datasets or profiles,
+leaves out a claim class, or makes a claim that cites no step.
+
+Source acquisition (`la-source`) is not exposed yet. It fetches over the network and
+writes a cache, which needs its own design for a server that can run over HTTP.
 
 ## Install
 
